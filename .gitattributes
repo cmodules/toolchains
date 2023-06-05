@@ -1,0 +1,10 @@
+# This sets the default behaviour, overriding core.autocrlf
+* text=auto eol=lf
+
+# Keep executable scripts with LFs so they can be run after being checked out on Windows
+CMakeLists.txt text eol=lf
+
+# Keep the LICENCE file with LFs to make sure it is uploaded, hashed etc with LF
+LICENCE eol=lf
+README eol=lf
+VERSION eol=lf
