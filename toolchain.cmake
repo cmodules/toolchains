@@ -1,11 +1,13 @@
-#!/usr/bin/env cmake
-
 # Mark variables as used so cmake doesn't complain about them
 mark_as_advanced(CMAKE_TOOLCHAIN_FILE)
 
+# if (${CMAKE_BINARY_DIR} STREQUAL ${CMAKE_SOURCE_DIR})
+#     message (WARNING "Configuring into source tree - please choose a different binary directory!")
+#     return ()
+# endif ()
+
 set(CONFIG_FATAL_ERROR)
 set(CONFIG_HAS_FATAL_ERROR OFF)
-
 function(add_fatal_error ERROR)
     if(NOT CONFIG_HAS_FATAL_ERROR)
         set(CONFIG_HAS_FATAL_ERROR ON PARENT_SCOPE)
@@ -24,24 +26,24 @@ cmake_policy(VERSION 3.7.2)
 
 option(VERBOSE "Enables output while configuring." ON)
 mark_as_advanced(VERBOSE)
-
 if($ENV{VERBOSE})
     set(VERBOSE "$ENV{VERBOSE}")
+    set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "Enable verbose output from Makefile builds.")
 else()
     set(VERBOSE ON)
 endif()
 
 option(APPLOCAL_DEPS "Automatically copy dependencies to output dir for executables (not functioning)." ON)
-option(APPLOCAL_DEPS_SERIALIZED "Adds USES_TERMINAL to APPLOCAL_DEPS to force serialization." OFF)
 
 if(NOT DEFINED TARGET_TRIPLET)
     message(STATUS "No TARGET_TRIPLET passed in during invocation. Using detected triplet...")
 endif()
 
-if(NOT DEFINED WINSDK_VERSION)
-    if(DEFINED ENV{WindowsSDKVersion})
+
+if(DEFINED ENV{WindowsSDKVersion})
+    if(NOT DEFINED WINSDK_VERSION)
         if("$ENV{WindowsSDKVersion}" MATCHES [[^([0-9.]*)\\?$]])
-            set(WINSDK_VERSION "$ENV{WindowsSDKVersion}" CACHE STRING "")
+            set(WINSDK_VERSION "$ENV{WindowsSDKVersion}" CACHE STRING "Windows SDK version.")
             message(STATUS "WINSDK_VERSION = ${WINSDK_VERSION}")
         else()
             message(FATAL_ERROR "Unexpected format for ENV{WindowsSDKVersion} ($ENV{WindowsSDKVersion})")
@@ -49,6 +51,12 @@ if(NOT DEFINED WINSDK_VERSION)
     endif()
 endif()
 
+function(escaped out_var value)
+    string(REPLACE "\\" "\\\\" value "${value}")
+    string(REPLACE "\"" "\\\"" value "${value}")
+    string(REPLACE "\$" "\\\$" value "${value}")
+    set(${out_var} "${value}" PARENT_SCOPE)
+endfunction()
 
 macro(function_arguments OUT_VAR)
     if("${ARGC}" EQUAL "1")
@@ -78,8 +86,6 @@ macro(function_arguments OUT_VAR)
     endif()
 endmacro()
 
-
-
 #[===[.md:
 # set_powershell_path
 
@@ -92,18 +98,289 @@ function(set_powershell_path)
         find_program(PWSH_PATH pwsh)
         if(PWSH_PATH)
             set(POWERSHELL_PATH "${PWSH_PATH}" CACHE INTERNAL "The path to the PowerShell implementation to use.")
+            message(STATUS "POWERSHELL_PATH = ${PWSH_PATH}")
         else()
             message(DEBUG "Could not find PowerShell Core; falling back to PowerShell")
             find_program(BUILTIN_POWERSHELL_PATH powershell REQUIRED)
             if(BUILTIN_POWERSHELL_PATH)
                 set(POWERSHELL_PATH "${BUILTIN_POWERSHELL_PATH}" CACHE INTERNAL "The path to the PowerShell implementation to use.")
+                message(STATUS "POWERSHELL_PATH = ${BUILTIN_POWERSHELL_PATH}")
             else()
                 message(WARNING "Could not find PowerShell; using static string 'powershell.exe'")
                 set(POWERSHELL_PATH "powershell.exe" CACHE INTERNAL "The path to the PowerShell implementation to use.")
+                message(STATUS "POWERSHELL_PATH = 'powershell.exe'")
             endif()
         endif()
     endif() # POWERSHELL_PATH
 endfunction()
+
+# Outputs to Cache: TARGET_COMPILER
+function(detect_compiler)
+    if(NOT DEFINED CACHE{TARGET_COMPILER})
+        message(STATUS "Detecting the C++ compiler in use")
+
+        if(CMAKE_GENERATOR STREQUAL "Ninja" AND CMAKE_SYSTEM_NAME STREQUAL "Windows")
+            set(CMAKE_C_COMPILER_WORKS 1)
+            set(CMAKE_C_COMPILER_FORCED 1)
+            set(CMAKE_CXX_COMPILER_WORKS 1)
+            set(CMAKE_CXX_COMPILER_FORCED 1)
+        endif()
+
+        if(NOT DEFINED LANGUAGES)
+            set(LANGUAGES C CXX CACHE STRING "Enabled languages.")
+        endif()
+
+        enable_language("${LANGUAGES}")
+
+        # foreach(LANGUAGE IN LANGUAGES)
+        #     file(SHA1 "${CMAKE_${LANGUAGE}_COMPILER}" ${LANGUAGE}_HASH)
+        # endforeach()
+
+        # enable_language(C)
+        # enable_language(CXX)
+
+        file(SHA1 "${CMAKE_CXX_COMPILER}" CXX_HASH)
+        file(SHA1 "${CMAKE_C_COMPILER}" C_HASH)
+        string(SHA1 COMPILER_HASH "${C_HASH}${CXX_HASH}")
+
+        if(VERBOSE)
+            message(STATUS "COMPILER_HASH = ${COMPILER_HASH}")
+            message(STATUS "COMPILER_C_HASH = ${C_HASH}")
+            message(STATUS "COMPILER_C_VERSION = ${CMAKE_C_COMPILER_VERSION}")
+            message(STATUS "COMPILER_C_ID = ${CMAKE_C_COMPILER_ID}")
+            message(STATUS "COMPILER_CXX_HASH = ${CXX_HASH}")
+            message(STATUS "COMPILER_CXX_VERSION = ${CMAKE_CXX_COMPILER_VERSION}")
+            message(STATUS "COMPILER_CXX_ID = ${CMAKE_CXX_COMPILER_ID}")
+        endif()
+
+        if(CMAKE_COMPILER_IS_GNUXX OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+            if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 6.0)
+                message(FATAL_ERROR [[
+The g++ version picked up is too old; please install a newer compiler such as g++-7.
+On Ubuntu try the following:
+    sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+    sudo apt-get update -y
+    sudo apt-get install g++-7 -y
+On CentOS try the following:
+    sudo yum install centos-release-scl
+    sudo yum install devtoolset-7
+    scl enable devtoolset-7 bash
+]])
+            endif()
+
+            set(COMPILER "gcc")
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang")
+            set(COMPILER "clang")
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "[Cc]lang")
+            set(COMPILER "clang")
+        elseif(MSVC)
+            set(COMPILER "msvc")
+        else()
+            message(FATAL_ERROR "Unknown compiler: ${CMAKE_CXX_COMPILER_ID}")
+        endif()
+
+        set(TARGET_COMPILER ${COMPILER} CACHE STRING "The compiler in use; one of gcc, clang, msvc")
+        message(STATUS "Detecting the C++ compiler in use - ${TARGET_COMPILER}")
+    endif()
+endfunction()
+
+
+macro(get_cmake_vars)
+
+    if(NOT FLAGS_OUTPUT_FILE)
+        set(FLAGS_OUTPUT_FILE "${CMAKE_CURRENT_BINARY_DIR}/flags.cmake")
+    endif()
+
+    set(OUTPUT_STRING "# Generator: ${CMAKE_CURRENT_LIST_FILE}\n")
+
+    # Build default checklists
+    list(APPEND DEFAULT_VARS_TO_CHECK
+        CMAKE_CROSSCOMPILING
+        CMAKE_SYSTEM_NAME
+        CMAKE_HOST_SYSTEM_NAME
+        CMAKE_SYSTEM_PROCESSOR
+        CMAKE_HOST_SYSTEM_PROCESSOR
+    )
+    if(APPLE)
+        list(APPEND DEFAULT_VARS_TO_CHECK
+            CMAKE_OSX_DEPLOYMENT_TARGET
+            CMAKE_OSX_SYSROOT
+        )
+    endif()
+
+    # Programs to check
+    set(PROGLIST AR RANLIB STRIP NM OBJDUMP DLLTOOL MT LINKER)
+    foreach(prog IN LISTS PROGLIST)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${prog})
+    endforeach()
+    set(COMPILERS ${LANGUAGES} RC)
+    foreach(prog IN LISTS COMPILERS)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${prog}_COMPILER CMAKE_${prog}_COMPILER_ID CMAKE_${prog}_COMPILER_FRONTEND_VARIANT)
+    endforeach()
+
+    # Variables to check
+    foreach(_lang IN LISTS LANGUAGES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_STANDARD_INCLUDE_DIRECTORIES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_STANDARD_LIBRARIES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_STANDARD)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_COMPILE_FEATURES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_EXTENSION)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_IMPLICIT_LINK_FRAMEWORK_DIRECTORIES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_COMPILER_TARGET)
+
+        # Probably never required since implicit.
+        # list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_IMPLICIT_LINK_FRAMEWORK_DIRECTORIES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_IMPLICIT_INCLUDE_DIRECTORIES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_IMPLICIT_LINK_DIRECTORIES)
+        list(APPEND DEFAULT_VARS_TO_CHECK CMAKE_${_lang}_IMPLICIT_LINK_LIBRARIES)
+    endforeach()
+    list(REMOVE_DUPLICATES DEFAULT_VARS_TO_CHECK)
+
+    # Environment variables to check.
+    list(APPEND DEFAULT_ENV_VARS_TO_CHECK PATH INCLUDE C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIB LIBPATH LIBRARY_PATH LD_LIBRARY_PATH CC CXX CPP CCFLAGS CXXFLAGS CPPFLAGS LDFLAGS ASM RC)
+    list(REMOVE_DUPLICATES DEFAULT_ENV_VARS_TO_CHECK)
+
+    #Flags to check. Flags are a bit special since they are configuration aware.
+    set(FLAGS ${LANGUAGES} RC SHARED_LINKER STATIC_LINKER EXE_LINKER MODULE_LINKER)
+    foreach(flag IN LISTS FLAGS)
+        list(APPEND DEFAULT_FLAGS_TO_CHECK CMAKE_${flag}_FLAGS)
+    endforeach()
+    list(REMOVE_DUPLICATES DEFAULT_FLAGS_TO_CHECK)
+
+    #Language-specific flags.
+    foreach(_lang IN LISTS LANGUAGES)
+        list(APPEND LANG_FLAGS CMAKE_${_lang}_FLAGS)
+    endforeach()
+    list(REMOVE_DUPLICATES LANG_FLAGS)
+
+    # TODO if ever necessary: Properties to check
+
+    set(VAR_PREFIX "DETECTED" CACHE STRING "Variable prefix to use for detected flags")
+    set(VARS_TO_CHECK "${DEFAULT_VARS_TO_CHECK}" CACHE STRING "Variables to check. If not given there is a list of defaults")
+    set(FLAGS_TO_CHECK "${DEFAULT_FLAGS_TO_CHECK}" CACHE STRING "Variables to check. If not given there is a list of defaults")
+    set(ENV_VARS_TO_CHECK "${DEFAULT_ENV_VARS_TO_CHECK}" CACHE STRING "Variables to check. If not given there is a list of defaults")
+
+    foreach(VAR IN LISTS VARS_TO_CHECK)
+        escaped(value "${${VAR}}")
+        string(APPEND OUTPUT_STRING "set(${VAR_PREFIX}_${VAR} \"${value}\")\n")
+    endforeach()
+
+    foreach(_env IN LISTS ENV_VARS_TO_CHECK)
+        if(CMAKE_HOST_WIN32)
+            string(REPLACE "\\" "/" value "$ENV{${_env}}")
+            escaped(value "${value}")
+        else()
+            escaped(value "$ENV{${_env}}")
+        endif()
+        string(APPEND OUTPUT_STRING "set(${VAR_PREFIX}_ENV_${_env} \"${value}\")\n")
+    endforeach()
+
+    set(extra_flags "")
+    if(CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN)
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            string(APPEND extra_flags " \"${CMAKE_CXX_COMPILE_OPTIONS_EXTERNAL_TOOLCHAIN}${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}\"")
+        else()
+            string(APPEND extra_flags " ${CMAKE_CXX_COMPILE_OPTIONS_EXTERNAL_TOOLCHAIN} \"${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}\"")
+        endif()
+    endif()
+    if(CMAKE_SYSROOT AND CMAKE_CXX_COMPILE_OPTIONS_SYSROOT)
+        string(APPEND extra_flags " \"${CMAKE_CXX_COMPILE_OPTIONS_SYSROOT}${CMAKE_SYSROOT}\"")
+    endif()
+
+    macro(adjust_flags flag_var)
+        if(MSVC) # Transform MSVC /flags to -flags due to msys2 runtime intepreting /flag as a path.
+            string(REGEX REPLACE "(^| )/" "\\1-" ${flag_var} "${${flag_var}}")
+            if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+                if("${flag_var}" STREQUAL "CMAKE_CXX_FLAGS")
+                    string(APPEND ${flag_var} " -ZW:nostdlib")
+                endif()
+            endif()
+        endif()
+        if(APPLE)
+            set(flags_to_add_osx_arch_sysroot "${LANG_FLAGS}" CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS CMAKE_EXE_LINKER_FLAGS)
+            if("${flag_var}" IN_LIST flags_to_add_osx_arch_sysroot)
+                # macOS - append arch and isysroot if cross-compiling
+                if(NOT "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+                    foreach(arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+                        string(APPEND ${flag_var} " -arch ${arch}")
+                    endforeach()
+                endif()
+                string(APPEND ${flag_var} " -isysroot ${CMAKE_OSX_SYSROOT}")
+                if (CMAKE_OSX_DEPLOYMENT_TARGET)
+                    list(GET LANGUAGES 0 lang)
+                    string(APPEND ${flag_var} " ${CMAKE_${lang}_OSX_DEPLOYMENT_TARGET_FLAG}${CMAKE_OSX_DEPLOYMENT_TARGET}")
+                    unset(lang)
+                endif()
+            endif()
+            unset(flags_to_add_osx_arch_sysroot)
+        endif()
+        set(flags_to_add_target "${LANG_FLAGS}" CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS CMAKE_EXE_LINKER_FLAGS)
+        list(GET LANGUAGES 0 lang)
+        if(CMAKE_${lang}_COMPILER_TARGET AND "${flag_var}" IN_LIST flags_to_add_target)
+            if (CMAKE_${lang}_COMPILER_ID STREQUAL Clang)
+                string(PREPEND ${flag_var} "${CMAKE_${lang}_COMPILE_OPTIONS_TARGET}${CMAKE_${lang}_COMPILER_TARGET} ")
+            elseif(CMAKE_${lang}_COMPILE_OPTIONS_TARGET)
+                string(PREPEND ${flag_var} "${CMAKE_${lang}_COMPILE_OPTIONS_TARGET} ${CMAKE_${lang}_COMPILER_TARGET} ")
+            endif()
+        endif()
+        if("${flag_var}" IN_LIST flags_to_add_target)
+            string(APPEND ${flag_var} " ${extra_flags}")
+        endif()
+        unset(lang)
+        unset(flags_to_add_target)
+    endmacro()
+
+
+    foreach(flag IN LISTS FLAGS_TO_CHECK)
+        string(STRIP "${${flag}}" ${flag}) # Strip leading and trailing whitespaces
+        adjust_flags(${flag})
+        escaped(value "${${flag}}")
+        string(APPEND OUTPUT_STRING "set(${VAR_PREFIX}_RAW_${flag} \" ${value}\")\n")
+        foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
+            escaped(raw_value "${CMAKE_${flag}_FLAGS_${config}}")
+            string(APPEND OUTPUT_STRING "set(${VAR_PREFIX}_RAW_${flag}_${config} \"${raw_value}\")\n")
+            string(STRIP "${${flag}_${config}}" ${flag}_${config})
+            adjust_flags(${flag}_${config})
+            escaped(combined_value "${${flag}} ${${flag}_${config}}")
+            string(STRIP "${combined_value}" combined_value)
+            string(APPEND OUTPUT_STRING "set(${VAR_PREFIX}_${flag}_${config} \"${combined_value}\")\n")
+        endforeach()
+    endforeach()
+
+    file(WRITE "${FLAGS_OUTPUT_FILE}" "${OUTPUT_STRING}")
+
+
+    # include("${FLAGS_OUTPUT_FILE}")
+
+    # Programs:
+    # CMAKE_AR
+    # CMAKE_<LANG>_COMPILER_AR (Wrapper)
+    # CMAKE_RANLIB
+    # CMAKE_<LANG>_COMPILER_RANLIB
+    # CMAKE_STRIP
+    # CMAKE_NM
+    # CMAKE_OBJDUMP
+    # CMAKE_DLLTOOL
+    # CMAKE_MT
+    # CMAKE_LINKER
+    # CMAKE_C_COMPILER
+    # CMAKE_CXX_COMPILER
+    # CMAKE_RC_COMPILER
+
+    # Flags:
+    # CMAKE_<LANG>_FLAGS
+    # CMAKE_<LANG>_FLAGS_<CONFIG>
+    # CMAKE_RC_FLAGS
+    # CMAKE_SHARED_LINKER_FLAGS
+    # CMAKE_STATIC_LINKER_FLAGS
+    # CMAKE_STATIC_LINKER_FLAGS_<CONFIG>
+    # CMAKE_EXE_LINKER_FLAGS
+    # CMAKE_EXE_LINKER_FLAGS_<CONFIG>
+
+endmacro()
+
+
+
 
 if(TARGET_IS_MINGW)
     # set(TOOLCHAIN_FILE "${TOOLCHAIN_FILES_DIR}/mingw.cmake")
@@ -111,24 +388,24 @@ if(TARGET_IS_MINGW)
         set(_MINGW_TOOLCHAIN 1)
         message(STATUS "Loading toolchain: MinGW")
         if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
-            set(CMAKE_CROSSCOMPILING OFF CACHE BOOL "")
+            set(CMAKE_CROSSCOMPILING OFF CACHE BOOL "Intended to indicate whether CMake is cross compiling, but note limitations discussed below.")
         endif()
 
-        # Need to override MinGW from VCPKG_CMAKE_SYSTEM_NAME
-        set(CMAKE_SYSTEM_NAME Windows CACHE STRING "" FORCE)
+        # Need to override MinGW from CMAKE_SYSTEM_NAME
+        set(CMAKE_SYSTEM_NAME Windows CACHE STRING "The name of the operating system for which CMake is to build" FORCE)
 
         if(TARGET_TRIPLET_ARCH STREQUAL "x86")
-            set(CMAKE_SYSTEM_PROCESSOR i686 CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR i686 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         elseif(TARGET_TRIPLET_ARCH STREQUAL "x64")
-            set(CMAKE_SYSTEM_PROCESSOR x86_64 CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR x86_64 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         elseif(TARGET_TRIPLET_ARCH STREQUAL "arm")
-            set(CMAKE_SYSTEM_PROCESSOR armv7 CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR armv7 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         elseif(TARGET_TRIPLET_ARCH STREQUAL "arm64")
-            set(CMAKE_SYSTEM_PROCESSOR aarch64 CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR aarch64 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         endif()
 
         foreach(lang C CXX)
-            set(CMAKE_${lang}_COMPILER_TARGET "${CMAKE_SYSTEM_PROCESSOR}-windows-gnu" CACHE STRING "")
+            set(CMAKE_${lang}_COMPILER_TARGET "${CMAKE_SYSTEM_PROCESSOR}-windows-gnu" CACHE STRING "The target for cross-compiling, if supported.")
         endforeach()
 
         find_program(CMAKE_C_COMPILER "${CMAKE_SYSTEM_PROCESSOR}-w64-mingw32-gcc")
@@ -138,25 +415,34 @@ if(TARGET_IS_MINGW)
             find_program(CMAKE_RC_COMPILER "windres")
         endif()
 
-        get_property( _CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
-        if(NOT _CMAKE_IN_TRY_COMPILE)
-            string(APPEND CMAKE_C_FLAGS_INIT " ${VCPKG_C_FLAGS} ")
-            string(APPEND CMAKE_CXX_FLAGS_INIT " ${VCPKG_CXX_FLAGS} ")
-            string(APPEND CMAKE_C_FLAGS_DEBUG_INIT " ${VCPKG_C_FLAGS_DEBUG} ")
-            string(APPEND CMAKE_CXX_FLAGS_DEBUG_INIT " ${VCPKG_CXX_FLAGS_DEBUG} ")
-            string(APPEND CMAKE_C_FLAGS_RELEASE_INIT " ${VCPKG_C_FLAGS_RELEASE} ")
-            string(APPEND CMAKE_CXX_FLAGS_RELEASE_INIT " ${VCPKG_CXX_FLAGS_RELEASE} ")
+        if(MSVC) # Transform MSVC /flags to -flags due to msys2 runtime intepreting /flag as a path.
+            string(REGEX REPLACE "(^| )/" "\\1-" ${flag_var} "${${flag_var}}")
+            if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+                if("${flag_var}" STREQUAL "CMAKE_CXX_FLAGS")
+                    string(APPEND ${flag_var} " -ZW:nostdlib")
+                endif()
+            endif()
+        endif()
 
-            string(APPEND CMAKE_SHARED_LINKER_FLAGS_INIT " ${VCPKG_LINKER_FLAGS} ")
-            string(APPEND CMAKE_EXE_LINKER_FLAGS_INIT " ${VCPKG_LINKER_FLAGS} ")
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
+            string(APPEND CMAKE_C_FLAGS_INIT " ${C_FLAGS} ")
+            string(APPEND CMAKE_CXX_FLAGS_INIT " ${CXX_FLAGS} ")
+            string(APPEND CMAKE_C_FLAGS_DEBUG_INIT " ${C_FLAGS_DEBUG} ")
+            string(APPEND CMAKE_CXX_FLAGS_DEBUG_INIT " ${CXX_FLAGS_DEBUG} ")
+            string(APPEND CMAKE_C_FLAGS_RELEASE_INIT " ${C_FLAGS_RELEASE} ")
+            string(APPEND CMAKE_CXX_FLAGS_RELEASE_INIT " ${CXX_FLAGS_RELEASE} ")
+
+            string(APPEND CMAKE_SHARED_LINKER_FLAGS_INIT " ${LINKER_FLAGS} ")
+            string(APPEND CMAKE_EXE_LINKER_FLAGS_INIT " ${LINKER_FLAGS} ")
             if(CRT_LINKAGE STREQUAL "static")
                 string(APPEND CMAKE_SHARED_LINKER_FLAGS_INIT "-static ")
                 string(APPEND CMAKE_EXE_LINKER_FLAGS_INIT "-static ")
             endif()
-            string(APPEND CMAKE_SHARED_LINKER_FLAGS_DEBUG_INIT " ${VCPKG_LINKER_FLAGS_DEBUG} ")
-            string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT " ${VCPKG_LINKER_FLAGS_DEBUG} ")
-            string(APPEND CMAKE_SHARED_LINKER_FLAGS_RELEASE_INIT " ${VCPKG_LINKER_FLAGS_RELEASE} ")
-            string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE_INIT " ${VCPKG_LINKER_FLAGS_RELEASE} ")
+            string(APPEND CMAKE_SHARED_LINKER_FLAGS_DEBUG_INIT " ${LINKER_FLAGS_DEBUG} ")
+            string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT " ${LINKER_FLAGS_DEBUG} ")
+            string(APPEND CMAKE_SHARED_LINKER_FLAGS_RELEASE_INIT " ${LINKER_FLAGS_RELEASE} ")
+            string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE_INIT " ${LINKER_FLAGS_RELEASE} ")
         endif()
     endif()
 elseif(TARGET_IS_XBOX)
@@ -165,47 +451,38 @@ elseif(TARGET_IS_XBOX)
 elseif(TARGET_IS_UWP)
     # set(TOOLCHAIN_FILE "${TOOLCHAIN_FILES_DIR}/uwp.cmake")
     message(STATUS "Loading toolchain: UWP")
-elseif(TARGET_IS_WINDOWS) # This is also true for MinGW and UWP targets, so place it after those...
-    # set(TOOLCHAIN_FILE "${TOOLCHAIN_FILES_DIR}/windows.cmake")
     if(NOT _WINDOWS_TOOLCHAIN)
         set(_WINDOWS_TOOLCHAIN 1)
-        message(STATUS "Loading toolchain: Windows")
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>$<$<STREQUAL:${CRT_LINKAGE},dynamic>:DLL>" CACHE STRING "Select the MSVC runtime library for use by compilers targeting the MSVC ABI.")
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>$<$<STREQUAL:${CRT_LINKAGE},dynamic>:DLL>" CACHE STRING "")
 
-        set(CMAKE_SYSTEM_NAME Windows CACHE STRING "")
+        set(CMAKE_SYSTEM_NAME WindowsStore CACHE STRING "The name of the operating system for which CMake is to build.")
 
         if(TARGET_TRIPLET_ARCH STREQUAL "x86")
-            set(CMAKE_SYSTEM_PROCESSOR x86 CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR x86 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         elseif(TARGET_TRIPLET_ARCH STREQUAL "x64")
-            set(CMAKE_SYSTEM_PROCESSOR AMD64 CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR AMD64 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         elseif(TARGET_TRIPLET_ARCH STREQUAL "arm")
-            set(CMAKE_SYSTEM_PROCESSOR ARM CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR ARM CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         elseif(TARGET_TRIPLET_ARCH STREQUAL "arm64")
-            set(CMAKE_SYSTEM_PROCESSOR ARM64 CACHE STRING "")
+            set(CMAKE_SYSTEM_PROCESSOR ARM64 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
         endif()
 
         if(DEFINED CMAKE_SYSTEM_VERSION)
             set(CMAKE_SYSTEM_VERSION "${CMAKE_SYSTEM_VERSION}" CACHE STRING "The version of the operating system for which CMake is to build." FORCE)
         endif()
 
-        if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
-            if(CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
-                set(CMAKE_CROSSCOMPILING OFF CACHE STRING "Intended to indicate whether CMake is cross compiling, but note limitations discussed below.")
-            elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86")
-                # any of the four platforms can run x86 binaries
-                set(CMAKE_CROSSCOMPILING OFF CACHE STRING "")
-            elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "ARM64")
-                # arm64 can run binaries of any of the four platforms after Windows 11
-                set(CMAKE_CROSSCOMPILING OFF CACHE STRING "Intended to indicate whether CMake is cross compiling, but note limitations discussed below.")
-            endif()
+        set(CMAKE_CROSSCOMPILING ON CACHE STRING "Intended to indicate whether CMake is cross compiling, but note limitations discussed below.")
 
-            if(NOT DEFINED CMAKE_SYSTEM_VERSION)
-                set(CMAKE_SYSTEM_VERSION "${CMAKE_HOST_SYSTEM_VERSION}" CACHE STRING "The version of the operating system for which CMake is to build.")
-            endif()
+        if(NOT DEFINED CMAKE_SYSTEM_VERSION)
+            set(CMAKE_SYSTEM_VERSION "${CMAKE_HOST_SYSTEM_VERSION}" CACHE STRING "The version of the operating system for which CMake is to build.")
         endif()
 
-        get_property( _CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
-        if(NOT _CMAKE_IN_TRY_COMPILE)
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
+
+            if(NOT (DEFINED MSVC_CXX_WINRT_EXTENSIONS))
+                set(MSVC_CXX_WINRT_EXTENSIONS ON)
+            endif()
 
             if(CRT_LINKAGE STREQUAL "dynamic")
                 set(CRT_LINK_FLAG_PREFIX "/MD")
@@ -226,8 +503,116 @@ elseif(TARGET_IS_WINDOWS) # This is also true for MinGW and UWP targets, so plac
                 set(MP_BUILD_FLAG "/MP")
             endif()
 
-            set(CMAKE_CXX_FLAGS " /nologo /DWIN32 /D_WINDOWS /W3 ${CHARSET_FLAG} /GR /EHsc ${MP_BUILD_FLAG} ${VCPKG_CXX_FLAGS}" CACHE STRING "")
-            set(CMAKE_C_FLAGS " /nologo /DWIN32 /D_WINDOWS /W3 ${CHARSET_FLAG} ${MP_BUILD_FLAG} ${VCPKG_C_FLAGS}" CACHE STRING "")
+            set(_cpp_flags "/DWIN32 /D_WINDOWS /D_UNICODE /DUNICODE /DWINAPI_FAMILY=WINAPI_FAMILY_APP /D__WRL_NO_DEFAULT_LIB__" ) # VS adds /D "_WINDLL" for DLLs;
+            set(_common_flags "/nologo /Z7 ${MP_BUILD_FLAG} /GS /Gd /Gm- /W3 /WX- /Zc:wchar_t /Zc:inline /Zc:forScope /fp:precise /Oy- /EHsc")
+
+            #/ZW:nostdlib -> ZW is added by CMake # VS also normally adds /sdl but not cmake MSBUILD
+            set(_winmd_flag "")
+            if(MSVC_CXX_WINRT_EXTENSIONS)
+                file(TO_CMAKE_PATH "$ENV{VCToolsInstallDir}" _vctools)
+                set(ENV{_CL_} "/FU\"${_vctools}/lib/x86/store/references/platform.winmd\" $ENV{_CL_}")
+                # CMake has problems to correctly pass this in the compiler test so probably need special care in get_cmake_vars
+                #set(_vcpkg_winmd_flag "/FU\\\\\"${_vcpkg_vctools}/lib/x86/store/references/platform.winmd\\\\\"") # VS normally passes /ZW for Apps
+            endif()
+
+            set(CMAKE_CXX_FLAGS "${_cpp_flags} ${_common_flags} ${_winmd_flag} ${CHARSET_FLAG} ${CXX_FLAGS}" CACHE STRING "Flags for all build types.")
+            set(CMAKE_C_FLAGS "${_cpp_flags} ${_common_flags} ${_winmd_flag} ${CHARSET_FLAG} ${C_FLAGS}" CACHE STRING "Flags for all build types.")
+            set(CMAKE_RC_FLAGS "-c65001 ${_cpp_flags}" CACHE STRING "Flags for all build types.")
+
+            unset(CHARSET_FLAG)
+            unset(_cpp_flags)
+            unset(_common_flags)
+            unset(_winmd_flag)
+
+            set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG ${CRT_LINK_FLAG_PREFIX}d /Od /RTC1 ${CXX_FLAGS_DEBUG}" CACHE STRING "Flags for language CXX when building for the 'DEBUG' configuration.")
+            set(CMAKE_C_FLAGS_DEBUG "/D_DEBUG ${CRT_LINK_FLAG_PREFIX}d /Od /RTC1 ${C_FLAGS_DEBUG}" CACHE STRING "Flags for language C when building for the 'DEBUG' configuration.")
+
+            set(CMAKE_CXX_FLAGS_RELEASE "${CRT_LINK_FLAG_PREFIX} /O2 /Oi /Gy /DNDEBUG ${CXX_FLAGS_RELEASE}" CACHE STRING "") # VS adds /GL
+            set(CMAKE_C_FLAGS_RELEASE "${CRT_LINK_FLAG_PREFIX} /O2 /Oi /Gy /DNDEBUG ${C_FLAGS_RELEASE}" CACHE STRING "")
+
+            string(APPEND CMAKE_STATIC_LINKER_FLAGS_RELEASE_INIT " /nologo ") # VS adds /LTCG
+
+            if(MSVC_CXX_WINRT_EXTENSIONS)
+                set(additional_dll_flags "/WINMD:NO")
+                if(CMAKE_GENERATOR MATCHES "Ninja")
+                    set(additional_exe_flags "/WINMD") # VS Generator chokes on this in the compiler detection
+                endif()
+            endif()
+            string(APPEND CMAKE_SHARED_LINKER_FLAGS " /MANIFEST:NO /NXCOMPAT /DYNAMICBASE /DEBUG ${additional_dll_flags} /APPCONTAINER /SUBSYSTEM:CONSOLE /MANIFESTUAC:NO ${LINKER_FLAGS}")
+            # VS adds /DEBUG:FULL /TLBID:1.    WindowsApp.lib is in CMAKE_C|CXX_STANDARD_LIBRARIES
+            string(APPEND CMAKE_EXE_LINKER_FLAGS " /MANIFEST:NO /NXCOMPAT /DYNAMICBASE /DEBUG ${additional_exe_flags} /APPCONTAINER /MANIFESTUAC:NO ${LINKER_FLAGS}")
+
+            set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF ${LINKER_FLAGS_RELEASE}" CACHE STRING "") # VS uses /LTCG:incremental
+            set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF ${LINKER_FLAGS_RELEASE}" CACHE STRING "")
+            string(APPEND CMAKE_STATIC_LINKER_FLAGS_DEBUG_INIT " /nologo ")
+            string(APPEND CMAKE_SHARED_LINKER_FLAGS_DEBUG_INIT " /nologo ")
+            string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT " /nologo ${LINKER_FLAGS} ${LINKER_FLAGS_DEBUG} ")
+        endif()
+    endif()
+
+elseif(TARGET_IS_WINDOWS) # This is also true for MinGW and UWP targets, so place it after those...
+    # set(TOOLCHAIN_FILE "${TOOLCHAIN_FILES_DIR}/windows.cmake")
+    if(NOT _WINDOWS_TOOLCHAIN)
+        set(_WINDOWS_TOOLCHAIN 1)
+        message(STATUS "Loading toolchain: Windows")
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>$<$<STREQUAL:${CRT_LINKAGE},dynamic>:DLL>" CACHE STRING "Select the MSVC runtime library for use by compilers targeting the MSVC ABI.")
+
+        set(CMAKE_SYSTEM_NAME Windows CACHE STRING "The name of the operating system for which CMake is to build.")
+
+        if(TARGET_TRIPLET_ARCH STREQUAL "x86")
+            set(CMAKE_SYSTEM_PROCESSOR x86 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
+        elseif(TARGET_TRIPLET_ARCH STREQUAL "x64")
+            set(CMAKE_SYSTEM_PROCESSOR AMD64 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
+        elseif(TARGET_TRIPLET_ARCH STREQUAL "arm")
+            set(CMAKE_SYSTEM_PROCESSOR ARM CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
+        elseif(TARGET_TRIPLET_ARCH STREQUAL "arm64")
+            set(CMAKE_SYSTEM_PROCESSOR ARM64 CACHE STRING "When not cross-compiling, this variable has the same value as the ``CMAKE_HOST_SYSTEM_PROCESSOR`` variable.")
+        endif()
+
+        if(DEFINED CMAKE_SYSTEM_VERSION)
+            set(CMAKE_SYSTEM_VERSION "${CMAKE_SYSTEM_VERSION}" CACHE STRING "The version of the operating system for which CMake is to build." FORCE)
+        endif()
+
+        if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+            if(CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
+                set(CMAKE_CROSSCOMPILING OFF CACHE STRING "Intended to indicate whether CMake is cross compiling, but note limitations discussed below.")
+            elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86")
+                # any of the four platforms can run x86 binaries
+                set(CMAKE_CROSSCOMPILING OFF CACHE STRING "Intended to indicate whether CMake is cross compiling, but note limitations discussed below.")
+            elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "ARM64")
+                # arm64 can run binaries of any of the four platforms after Windows 11
+                set(CMAKE_CROSSCOMPILING OFF CACHE STRING "Intended to indicate whether CMake is cross compiling, but note limitations discussed below.")
+            endif()
+
+            if(NOT DEFINED CMAKE_SYSTEM_VERSION)
+                set(CMAKE_SYSTEM_VERSION "${CMAKE_HOST_SYSTEM_VERSION}" CACHE STRING "The version of the operating system for which CMake is to build.")
+            endif()
+        endif()
+
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
+
+            if(CRT_LINKAGE STREQUAL "dynamic")
+                set(CRT_LINK_FLAG_PREFIX "/MD")
+            elseif(CRT_LINKAGE STREQUAL "static")
+                set(CRT_LINK_FLAG_PREFIX "/MT")
+            else()
+                message(FATAL_ERROR "Invalid setting for CRT_LINKAGE: \"${CRT_LINKAGE}\". It must be \"static\" or \"dynamic\"")
+            endif()
+
+            set(CHARSET_FLAG "/utf-8")
+            if (NOT SET_CHARSET_FLAG OR PLATFORM_TOOLSET MATCHES "v120")
+                # VS 2013 does not support /utf-8
+                set(CHARSET_FLAG)
+            endif()
+
+            set(MP_BUILD_FLAG "")
+            if(NOT (CMAKE_CXX_COMPILER MATCHES "clang-cl.exe"))
+                set(MP_BUILD_FLAG "/MP")
+            endif()
+
+            set(CMAKE_CXX_FLAGS " /nologo /DWIN32 /D_WINDOWS /W3 ${CHARSET_FLAG} /GR /EHsc ${MP_BUILD_FLAG} ${CXX_FLAGS}" CACHE STRING "Flags for all build types.")
+            set(CMAKE_C_FLAGS " /nologo /DWIN32 /D_WINDOWS /W3 ${CHARSET_FLAG} ${MP_BUILD_FLAG} ${C_FLAGS}" CACHE STRING "Flags for all build types.")
 
             if(TARGET_TRIPLET_ARCH STREQUAL "arm64ec")
                 string(APPEND CMAKE_CXX_FLAGS " /arm64EC /D_AMD64_ /DAMD64 /D_ARM64EC_ /DARM64EC")
@@ -237,18 +622,18 @@ elseif(TARGET_IS_WINDOWS) # This is also true for MinGW and UWP targets, so plac
 
             unset(CHARSET_FLAG)
 
-            set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG ${CRT_LINK_FLAG_PREFIX}d /Z7 /Ob0 /Od /RTC1 ${VCPKG_CXX_FLAGS_DEBUG}" CACHE STRING "")
-            set(CMAKE_C_FLAGS_DEBUG "/D_DEBUG ${CRT_LINK_FLAG_PREFIX}d /Z7 /Ob0 /Od /RTC1 ${VCPKG_C_FLAGS_DEBUG}" CACHE STRING "")
-            set(CMAKE_CXX_FLAGS_RELEASE "${CRT_LINK_FLAG_PREFIX} /O2 /Oi /Gy /DNDEBUG /Z7 ${VCPKG_CXX_FLAGS_RELEASE}" CACHE STRING "")
-            set(CMAKE_C_FLAGS_RELEASE "${CRT_LINK_FLAG_PREFIX} /O2 /Oi /Gy /DNDEBUG /Z7 ${VCPKG_C_FLAGS_RELEASE}" CACHE STRING "")
+            set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG ${CRT_LINK_FLAG_PREFIX}d /Z7 /Ob0 /Od /RTC1 ${CXX_FLAGS_DEBUG}" CACHE STRING "Flags for language CXX when building for the 'DEBUG' configuration.")
+            set(CMAKE_C_FLAGS_DEBUG "/D_DEBUG ${CRT_LINK_FLAG_PREFIX}d /Z7 /Ob0 /Od /RTC1 ${C_FLAGS_DEBUG}" CACHE STRING "Flags for language C when building for the 'DEBUG' configuration.")
+            set(CMAKE_CXX_FLAGS_RELEASE "${CRT_LINK_FLAG_PREFIX} /O2 /Oi /Gy /DNDEBUG /Z7 ${CXX_FLAGS_RELEASE}" CACHE STRING "Flags for language CXX when building for the 'RELEASE' configuration.")
+            set(CMAKE_C_FLAGS_RELEASE "${CRT_LINK_FLAG_PREFIX} /O2 /Oi /Gy /DNDEBUG /Z7 ${C_FLAGS_RELEASE}" CACHE STRING "Flags for language C when building for the 'RELEASE' configuration.")
 
             string(APPEND CMAKE_STATIC_LINKER_FLAGS_RELEASE_INIT " /nologo ")
-            set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "/nologo /DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF ${VCPKG_LINKER_FLAGS} ${VCPKG_LINKER_FLAGS_RELEASE}" CACHE STRING "")
-            set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/nologo /DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF ${VCPKG_LINKER_FLAGS} ${VCPKG_LINKER_FLAGS_RELEASE}" CACHE STRING "")
+            set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "/nologo /DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF ${LINKER_FLAGS} ${LINKER_FLAGS_RELEASE}" CACHE STRING "Flags to be used when linking a shared library.")
+            set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/nologo /DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF ${LINKER_FLAGS} ${LINKER_FLAGS_RELEASE}" CACHE STRING "Flags to be used when linking an executable.")
 
             string(APPEND CMAKE_STATIC_LINKER_FLAGS_DEBUG_INIT " /nologo ")
-            string(APPEND CMAKE_SHARED_LINKER_FLAGS_DEBUG_INIT " /nologo ${VCPKG_LINKER_FLAGS} ${VCPKG_LINKER_FLAGS_DEBUG} ")
-            string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT " /nologo ${VCPKG_LINKER_FLAGS} ${VCPKG_LINKER_FLAGS_DEBUG} ")
+            string(APPEND CMAKE_SHARED_LINKER_FLAGS_DEBUG_INIT " /nologo ${LINKER_FLAGS} ${LINKER_FLAGS_DEBUG} ")
+            string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT " /nologo ${LINKER_FLAGS} ${LINKER_FLAGS_DEBUG} ")
         endif()
     endif()
 
@@ -304,8 +689,8 @@ elseif(TARGET_IS_LINUX)
             endif()
         endif()
 
-        get_property( _CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
-        if(NOT _CMAKE_IN_TRY_COMPILE)
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
             string(APPEND CMAKE_C_FLAGS_INIT " -fPIC ${VCPKG_C_FLAGS} ")
             string(APPEND CMAKE_CXX_FLAGS_INIT " -fPIC ${VCPKG_CXX_FLAGS} ")
             string(APPEND CMAKE_C_FLAGS_DEBUG_INIT " ${VCPKG_C_FLAGS_DEBUG} ")
@@ -364,8 +749,8 @@ elseif(TARGET_IS_ANDROID)
     if(NOT _VCPKG_ANDROID_TOOLCHAIN)
         set(_VCPKG_ANDROID_TOOLCHAIN 1)
         message(STATUS "Loading toolchain: Android")
-        get_property( _CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
-        if(NOT _CMAKE_IN_TRY_COMPILE)
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
             string(APPEND CMAKE_C_FLAGS " -fPIC ${VCPKG_C_FLAGS} ")
             string(APPEND CMAKE_CXX_FLAGS " -fPIC ${VCPKG_CXX_FLAGS} ")
             string(APPEND CMAKE_C_FLAGS_DEBUG " ${VCPKG_C_FLAGS_DEBUG} ")
@@ -389,7 +774,7 @@ elseif(TARGET_IS_OSX)
 
         set(CMAKE_SYSTEM_NAME Darwin CACHE STRING "")
 
-        set(CMAKE_MACOSX_RPATH ON CACHE BOOL "")
+        set(CMAKE_MACOSX_RPATH ON CACHE BOOL "Whether to use rpaths on macOS and iOS.")
 
         if(NOT DEFINED CMAKE_SYSTEM_PROCESSOR)
             if(TARGET_TRIPLET_ARCH STREQUAL "x64")
@@ -420,8 +805,8 @@ elseif(TARGET_IS_OSX)
             endif()
         endif()
 
-        get_property( _CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
-        if(NOT _CMAKE_IN_TRY_COMPILE)
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
             string(APPEND CMAKE_C_FLAGS_INIT " -fPIC ${VCPKG_C_FLAGS} ")
             string(APPEND CMAKE_CXX_FLAGS_INIT " -fPIC ${VCPKG_CXX_FLAGS} ")
             string(APPEND CMAKE_C_FLAGS_DEBUG_INIT " ${VCPKG_C_FLAGS_DEBUG} ")
@@ -452,8 +837,8 @@ elseif(TARGET_IS_FREEBSD)
         endif()
         set(CMAKE_SYSTEM_NAME FreeBSD CACHE STRING "")
 
-        get_property( _CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
-        if(NOT _CMAKE_IN_TRY_COMPILE)
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
             string(APPEND CMAKE_C_FLAGS_INIT " -fPIC ${VCPKG_C_FLAGS} ")
             string(APPEND CMAKE_CXX_FLAGS_INIT " -fPIC ${VCPKG_CXX_FLAGS} ")
             string(APPEND CMAKE_C_FLAGS_DEBUG_INIT " ${VCPKG_C_FLAGS_DEBUG} ")
@@ -489,8 +874,8 @@ elseif(TARGET_IS_OPENBSD)
             set(CMAKE_C_COMPILER "/usr/bin/clang")
         endif()
 
-        get_property( _CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
-        if(NOT _CMAKE_IN_TRY_COMPILE)
+        get_property( _TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE )
+        if(NOT _TOOLCHAIN_IN_TRY_COMPILE)
             string(APPEND CMAKE_C_FLAGS_INIT " -fPIC ${VCPKG_C_FLAGS} ")
             string(APPEND CMAKE_CXX_FLAGS_INIT " -fPIC ${VCPKG_CXX_FLAGS} ")
             string(APPEND CMAKE_C_FLAGS_DEBUG_INIT " ${VCPKG_C_FLAGS_DEBUG} ")
@@ -504,7 +889,7 @@ elseif(TARGET_IS_OPENBSD)
             string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT " ${VCPKG_LINKER_FLAGS_DEBUG} ")
             string(APPEND CMAKE_SHARED_LINKER_FLAGS_RELEASE_INIT " ${VCPKG_LINKER_FLAGS_RELEASE} ")
             string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE_INIT " ${VCPKG_LINKER_FLAGS_RELEASE} ")
-        endif(NOT _CMAKE_IN_TRY_COMPILE)
+        endif(NOT _TOOLCHAIN_IN_TRY_COMPILE)
     endif(NOT _OPENBSD_TOOLCHAIN)
     # End of OpenBSD toolchain.
 
@@ -517,7 +902,7 @@ endif()
 
 
 # Determine whether the toolchain is loaded during a try-compile configuration
-get_property(TOOLCHAIN_CMAKE_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE)
+get_property(TOOLCHAIN_IN_TRY_COMPILE GLOBAL PROPERTY IN_TRY_COMPILE)
 
 if(USE_TOOLCHAIN)
     cmake_policy(POP)
@@ -612,7 +997,7 @@ else()
                                 "Continuing without toolchain.")
                 set(USE_TOOLCHAIN ON)
                 cmake_policy(POP)
-                message(STATUS "Toolchain returning at line ${CMAKE_CURRENT_LIST_LINE}")
+                message(WARNING "Toolchain returning unusually at line ${CMAKE_CURRENT_LIST_LINE}")
                 return()
             endif()
 
@@ -636,7 +1021,7 @@ else()
                 message(WARNING "Unable to determine target architecture, continuing without toolchain.")
                 set(USE_TOOLCHAIN ON)
                 cmake_policy(POP)
-                message(STATUS "Toolchain returning at line ${CMAKE_CURRENT_LIST_LINE}")
+                message(WARNING "Toolchain returning unusually at line ${CMAKE_CURRENT_LIST_LINE}")
                 return()
             endif()
         elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64" OR
@@ -657,14 +1042,14 @@ else()
 	elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "riscv64")
 	    set(TARGET_TRIPLET_ARCH riscv64)
         else()
-            if(TOOLCHAIN_CMAKE_IN_TRY_COMPILE)
+            if(TOOLCHAIN_IN_TRY_COMPILE)
                 message(STATUS "Unable to determine target architecture.")
             else()
                 message(WARNING "Unable to determine target architecture.")
             endif()
             set(USE_TOOLCHAIN ON)
             cmake_policy(POP)
-            message(STATUS "Toolchain returning at line ${CMAKE_CURRENT_LIST_LINE}")
+            message(WARNING "Toolchain returning unsually at line ${CMAKE_CURRENT_LIST_LINE}")
             return()
         endif()
     endif()
@@ -683,6 +1068,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR (NOT CMAKE_SYSTEM_NAME AND CMAKE_H
 elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(TARGET_TRIPLET_PLATFORM ios)
 elseif(MINGW OR (CMAKE_SYSTEM_NAME OR CMAKE_HOST_SYSTEM_NAME STREQUAL "MSYS"))
+    message(WARNING "Detected Mingw")
     set(TARGET_TRIPLET_PLATFORM mingw-dynamic)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows" OR (NOT CMAKE_SYSTEM_NAME AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows"))
     if(XBOX_CONSOLE_TARGET STREQUAL "scarlett")
@@ -1099,7 +1485,7 @@ endif()
 
 if(DEFINED OSX_ARCHITECTURES)
     set(OSX_ARCHITECTURES "${OSX_ARCHITECTURES}" CACHE STRING "OSX Architectures available.")
-    # set(CMAKE_OSX_ARCHITECTURES "${OSX_ARCHITECTURES}")
+    set(CMAKE_OSX_ARCHITECTURES "${OSX_ARCHITECTURES}")
 endif()
 if(DEFINED ANDROID_ABI)
     set(ANDROID_ABI "${ANDROID_ABI}" CACHE STRING "Android binary interface to use.")
@@ -1113,9 +1499,9 @@ if(DEFINED ANDROID_ARM_MODE)
     set(ANDROID_ARM_MODE "${ANDROID_ARM_MODE}" CACHE STRING "Mode to use for arm-based android targets.")
     set(CMAKE_ANDROID_ARM_MODE "${ANDROID_ARM_MODE}" CACHE STRING "When :`Cross Compiling for Android` and ``CMAKE_ANDROID_ARCH_ABI`` is set to one of the ``armeabi`` architectures, set ``CMAKE_ANDROID_ARM_MODE`` to ``ON`` to target 32-bit ARM processors (``-marm``).")
 endif()
-# if(DEFINED MAKEFILE_BUILD_TRIPLET)
-#     list(APPEND CMAKE_USER_MAKE_RULES_OVERRIDE "${MAKEFILE_BUILD_TRIPLET}")
-# endif()
+if(DEFINED MAKEFILE_BUILD_TRIPLET)
+    list(APPEND CMAKE_USER_MAKE_RULES_OVERRIDE "${MAKEFILE_BUILD_TRIPLET}")
+endif()
 if(XBOX_CONSOLE_TARGET STREQUAL "xboxone" OR XBOX_CONSOLE_TARGET STREQUAL "xboxone")
     set(XBOX_CONSOLE_TARGET "${XBOX_CONSOLE_TARGET}" CACHE STRING "Xbox console target. Can be 'xboxone' or 'scarlett'.")
 endif()
@@ -1153,7 +1539,7 @@ endif()
 
 ###################################################
 
-#Helper variable to identify the Target system. VCPKG_TARGET_IS_<targetname>
+#Helper variable to identify the Target system. TARGET_IS_<targetname>
 if (NOT DEFINED CMAKE_SYSTEM_NAME OR CMAKE_SYSTEM_NAME STREQUAL "")
     set(TARGET_IS_WINDOWS ON)
 
@@ -1369,12 +1755,16 @@ endif()
 
 if(USE_TOOLCHAIN)
     cmake_policy(POP)
-    message(STATUS "Toolchain returning at line ${CMAKE_CURRENT_LIST_LINE}")
+    message(WARNING "Toolchain returning unsually at line ${CMAKE_CURRENT_LIST_LINE}")
     return()
 endif()
 
 
+
+#############
+
 string(COMPARE NOTEQUAL "${TARGET_TRIPLET}" "${HOST_TRIPLET}" CROSSCOMPILING)
+set(CMAKE_CROSSCOMPILING "${CROSSCOMPILING}" CACHE STRING "")
 
 cmake_policy(POP)
 
@@ -1408,7 +1798,7 @@ function(add_executable)
                 if(NOT MACOSX_BUNDLE_IDX EQUAL "-1")
                     find_package(Python COMPONENTS Interpreter)
                     add_custom_command(TARGET "${target_name}" POST_BUILD
-                        COMMAND "${Python_EXECUTABLE}" "./osx/applocal.py"
+                        COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/osx/applocal.py"
                             "$<TARGET_FILE:${target_name}>"
                             "${CMAKE_INSTALL_PREFIX}/${TARGET_TRIPLET}$<$<CONFIG:Debug>:/debug>"
                         VERBATIM
@@ -1434,7 +1824,7 @@ function(add_library)
         if(APPLOCAL_DEPS AND TARGET_TRIPLET_PLATFORM MATCHES "windows|uwp|xbox" AND (IS_LIBRARY_SHARED STREQUAL "SHARED_LIBRARY" OR IS_LIBRARY_SHARED STREQUAL "MODULE_LIBRARY"))
             set_powershell_path()
             add_custom_command(TARGET "${target_name}" POST_BUILD
-                COMMAND "${POWERSHELL_PATH}" -noprofile -executionpolicy Bypass -file "./msbuild/applocal.ps1"
+                COMMAND "${POWERSHELL_PATH}" -noprofile -executionpolicy Bypass -file "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/msbuild/applocal.ps1"
                     -targetBinary "$<TARGET_FILE:${target_name}>"
                     -installedDir "${CMAKE_INSTALL_PREFIX}/${TARGET_TRIPLET}$<$<CONFIG:Debug>:/debug>/bin"
                     -OutVariable out
@@ -1452,14 +1842,8 @@ cmake_policy(VERSION 3.7.2)
 # Don't change this var, it prevents cyclical includes :)
 set(USE_TOOLCHAIN ON)
 
-# set(Z_VCPKG_UNUSED "${CMAKE_ERROR_ON_ABSOLUTE_INSTALL_DESTINATION}")
-# set(Z_VCPKG_UNUSED "${CMAKE_EXPORT_NO_PACKAGE_REGISTRY}")
-# set(Z_VCPKG_UNUSED "${CMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY}")
-# set(Z_VCPKG_UNUSED "${CMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY}")
-# set(Z_VCPKG_UNUSED "${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP}")
-
 # Propogate these values to try-compile configurations so the triplet and toolchain load
-if(NOT TOOLCHAIN_CMAKE_IN_TRY_COMPILE)
+if(NOT TOOLCHAIN_IN_TRY_COMPILE)
     list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
         TARGET_TRIPLET
         TARGET_TRIPLET_ARCH
@@ -1529,3 +1913,7 @@ endif()
 if (DEFINED HEAD_VERSION)
     file(APPEND ${BUILD_INFO_FILE_PATH} "Version: ${HEAD_VERSION}\n")
 endif()
+
+
+###################
+
