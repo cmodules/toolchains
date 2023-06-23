@@ -1,6 +1,8 @@
 # This sets the default behaviour, overriding core.autocrlf
 * text=auto eol=lf
 
+.editorconfig text eol=lf
+
 # Keep executable scripts with LFs so they can be run after being checked out on Windows
 CMakeLists.txt text eol=lf
 
